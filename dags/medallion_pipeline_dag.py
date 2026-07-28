@@ -1,11 +1,13 @@
 """
-Orchestrates the bronze -> silver -> gold -> Delta pipeline.
+Orchestrates the bronze -> silver -> gold -> Delta -> Unity Catalog
+pipeline.
 
 Deliberately fails fast and loud at each gate instead of silently limping
-forward: if bronze data is missing, dbt tests fail, or the Delta write
-errors, the DAG run is marked failed and nothing downstream runs. An
-on-call engineer reading Airflow's UI should be able to tell exactly which
-stage broke without reading logs line by line.
+forward: if bronze data is missing, dbt tests fail, the Delta write
+errors, or the Unity Catalog publish fails, the DAG run is marked failed
+and nothing downstream runs. An on-call engineer reading Airflow's UI
+should be able to tell exactly which stage broke without reading logs
+line by line.
 """
 import glob
 import os
@@ -35,11 +37,11 @@ def check_bronze_data():
 
 with DAG(
     dag_id="medallion_pipeline",
-    description="bronze (JSONL) -> dbt-duckdb silver/gold -> Delta Lake",
+    description="bronze (JSONL) -> dbt-duckdb silver/gold -> Delta Lake -> Unity Catalog",
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    tags=["medallion", "dbt", "delta"],
+    tags=["medallion", "dbt", "delta", "unity-catalog"],
 ) as dag:
 
     check_bronze = PythonOperator(
@@ -65,4 +67,10 @@ with DAG(
         cwd=PROJECT_ROOT,
     )
 
-    check_bronze >> dbt_run >> dbt_test >> write_gold_to_delta
+    publish_to_unity_catalog = BashOperator(
+        task_id="publish_to_unity_catalog",
+        bash_command=f"{VENV_BIN}/python scripts/publish_gold_to_unity_catalog.py",
+        cwd=PROJECT_ROOT,
+    )
+
+    check_bronze >> dbt_run >> dbt_test >> write_gold_to_delta >> publish_to_unity_catalog

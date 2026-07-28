@@ -29,12 +29,16 @@ gold.* (incremental,          rejection rate > 2%?  -- fails the pipeline if yes
       |
       v   scripts/write_gold_to_delta.py  (only runs if all dbt tests pass)
 data/delta/*                   real Delta Lake tables (_delta_log, versioned, Parquet)
+      |
+      v   scripts/publish_gold_to_unity_catalog.py
+workspace.medallion_pipeline.*  real Unity Catalog tables on Databricks --
+                                 grants, column/table comments, lineage
 ```
 
 Orchestrated by an Airflow DAG (`dags/medallion_pipeline_dag.py`):
 
 ```
-check_bronze_data  ->  dbt_run  ->  dbt_test  ->  write_gold_to_delta
+check_bronze_data -> dbt_run -> dbt_test -> write_gold_to_delta -> publish_to_unity_catalog
 ```
 
 Each arrow is a hard gate, not a suggestion. If bronze data is missing, the
@@ -221,6 +225,62 @@ recording because they'd have stayed invisible on cleaner data:
    unique_key is never null. Never leave a nullable column in an
    incremental unique_key, even if today's data happens not to trigger it.
 
+## Governance: gold published to a real Unity Catalog, with real grants and lineage
+
+`scripts/publish_gold_to_unity_catalog.py` publishes all 3 gold tables
+into an actual Unity Catalog on a real Databricks workspace -- not a
+mock, not a local stand-in. It's the last step in the DAG, gated the same
+way the Delta write is: it only runs after `dbt_test` passes.
+
+**Why not register the local Delta tables directly as Unity Catalog
+external tables:** UC external tables need a cloud storage path
+(S3/ADLS/GCS) that the workspace has a configured storage credential for.
+These Delta tables live on a laptop's local disk -- a remote workspace
+has no way to reach that path, and faking it with a placeholder path
+wouldn't be better than being upfront about the boundary. What actually
+happens instead, which is a real, common pattern (a local/on-prem job
+publishing its finished marts into a governed lakehouse for downstream
+consumption): each gold table is read back out of its local Delta
+format, exported to Parquet, uploaded via the Databricks CLI into a
+Unity Catalog Volume (`workspace.medallion_pipeline.gold_staging`), then
+materialized as a real managed table via `CREATE TABLE ... AS SELECT
+FROM read_files(...)` executed against the workspace's serverless SQL
+warehouse over the SQL Statement Execution API.
+
+Verified live, independently of the publish script itself:
+
+```
+$ databricks tables get workspace.medallion_pipeline.gold_311_daily_agency_summary
+  comment: "NYC 311 requests aggregated by (request_date, agency, complaint_type)..."
+  columns: request_date, agency, agency_name, complaint_type, request_count,
+           avg_resolution_hours ("Hours between created_at and closed_at..."),
+           closed_count, open_count
+
+$ SELECT count(*) FROM workspace.medallion_pipeline.gold_311_daily_agency_summary       -> 94
+$ SELECT count(*) FROM workspace.medallion_pipeline.gold_commit_activity_daily          -> 29
+$ SELECT count(*) FROM workspace.medallion_pipeline.gold_sec_filings_by_state_month     -> 113
+  (all three match the local Delta table counts exactly)
+
+$ SHOW GRANTS ON SCHEMA workspace.medallion_pipeline
+  account users | SELECT      | SCHEMA | workspace.medallion_pipeline
+  account users | USE SCHEMA  | SCHEMA | workspace.medallion_pipeline
+
+$ GET /api/2.0/lineage-tracking/table-lineage  (table_name=...gold_311_daily_agency_summary)
+  upstream: VOLUME workspace.medallion_pipeline.gold_staging, path .../gold_311_daily_agency_summary/
+  (Unity Catalog tracked this automatically from the CREATE TABLE AS SELECT -- not something the script asserts itself)
+```
+
+That's the actual governance story: table/column-level documentation
+(`COMMENT ON`), access control that's queryable and enforced (`SHOW
+GRANTS`, not just "we could add grants"), and lineage that Unity Catalog
+recorded on its own from the real operation, not from a lineage record
+the script wrote by hand.
+
+Environment-specific and not portable out of the box: the workspace host,
+warehouse ID, and catalog/schema names are specific to this Databricks
+account (`~/.databrickscfg` profile `singhshaifali25@gmail.com`). Running
+this elsewhere means pointing it at your own workspace and warehouse ID.
+
 ## Running it yourself
 
 ```bash
@@ -236,6 +296,11 @@ python -m venv .venv
 # Delta write -- only meaningful to run manually if you've fixed the gate;
 # via the DAG below it's correctly skipped after a failed dbt_test.
 .venv/bin/python scripts/write_gold_to_delta.py
+
+# Unity Catalog publish -- requires `databricks auth login` against your
+# own workspace first, and DATABRICKS_WAREHOUSE_ID / catalog+schema names
+# in scripts/publish_gold_to_unity_catalog.py pointed at your workspace.
+.venv/bin/python scripts/publish_gold_to_unity_catalog.py
 
 # Airflow -- point AIRFLOW_HOME at a local dir, migrate the metadata DB once,
 # and set dags_folder in the generated airflow.cfg to this repo's dags/
@@ -284,6 +349,18 @@ print(dt.version(), dt.to_pyarrow_table().num_rows)
   still needs a manual `--full-refresh` to be picked up -- see "Late-arriving
   records" above for why that trade-off was made deliberately rather than
   reprocessing all of history on every run.
+- **Unity Catalog grants are intentionally broad for this demo.** `SELECT`
+  and `USE SCHEMA` are granted to `account users` (everyone in the
+  account) rather than a specific role/group, since this is a
+  single-person workspace with no other users to scope a real grant to.
+  The grant mechanism itself is real and enforced; a production rollout
+  would grant to specific groups instead.
+- **Unity Catalog publish is a full replace, not an incremental append.**
+  `publish_gold_to_unity_catalog.py` runs `CREATE OR REPLACE TABLE` on
+  every publish, mirroring the Delta export's full-snapshot approach for
+  the same reason -- the underlying gold table is already correctly
+  incremental, so re-publishing the whole (small) result is simpler than
+  building a second incremental-merge path on top of it.
 - **Bronze data here is a snapshot, not a live read.** `bronze_source/` is
   a copy of Project 1's actual live output (see its README for how it was
   produced), not a live pointer at Project 1's `data/bronze/`. Decoupled
