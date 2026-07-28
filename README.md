@@ -68,17 +68,15 @@ would read from. That's the actual point of putting a data-quality gate
 
 ## What's proven, live, in this build
 
-Two structurally unrelated domains modeled end-to-end (mirrors Project 1's
-"prove genericity across sources" pattern, applied here to "prove the
+All three of Project 1's live sources modeled end-to-end (mirrors Project
+1's "prove genericity across sources" pattern, applied here to "prove the
 medallion pattern generalizes across domains"):
 
 | Domain | Silver grain | Gold grain |
 |---|---|---|
 | NYC 311 requests | 1 row / valid request (deduped on `request_id`) | 1 row / (day, agency, complaint_type) |
 | GitHub commits | 1 row / valid commit (deduped on `commit_sha`) | 1 row / (day, author) |
-
-`sec_edgar_10k` bronze data is wired up as a dbt source but has no
-staging/silver/gold models yet -- see Known limitations.
+| SEC EDGAR 10-K filings | 1 row / valid filing (deduped on `accession_number`) | 1 row / (month, biz state, form type) |
 
 ## The data-quality gate, proven to actually fail
 
@@ -185,6 +183,44 @@ picked up. That's a deliberate trade-off (reprocessing 3 days of history
 every run is cheap; reprocessing all of history every run defeats the
 point of incremental models) -- see Known limitations.
 
+## SEC EDGAR: a third domain, and two real bugs it surfaced
+
+`sec_edgar_10k` bronze data (SEC's full-text search API results, nested
+JSON: `_source.adsh`, `_source.ciks[]`, `_source.biz_states[]`, etc.) is
+now fully modeled: `stg_sec_edgar_filings` -> `slv_sec_filings` /
+`rejected_sec_filings` -> `gold_sec_filings_by_state_month`, same
+quarantine + rejection-rate-gate + incremental-with-lookback pattern as
+the other two domains, and included in `write_gold_to_delta.py`.
+
+Building it against real data (not synthetic) surfaced two genuine bugs
+in the pattern already shipped for the other two domains -- worth
+recording because they'd have stayed invisible on cleaner data:
+
+1. **A real duplicate key, found organically.** SEC's search API can
+   return multiple matched documents for the same filing (the main 10-K
+   plus an exhibit that also matched the search terms): 200 rows, 200
+   distinct `filing_id`, but only **199** distinct `accession_number`.
+   Deduped in `slv_sec_filings` by keeping the lowest `sequence` value
+   (the primary document, not an exhibit) -- the same `row_number()`
+   pattern as the other two silver models, just triggered by real data
+   for once instead of a manufactured demo batch.
+2. **A null-safe join bug in the recompute tests, and a sharper one in
+   `delete+insert` itself.** `biz_state` is null for one filing (no
+   `biz_states` in the source record). The first version of
+   `assert_gold_sec_filings_matches_full_recompute.sql` joined gold to a
+   fresh recompute with plain `=` on the grain columns -- and `null = null`
+   is `null`, not true, in SQL, so that row silently failed to match even
+   though gold had it correctly. Fixed the test with `is not distinct from`.
+   But the *real* version of this bug is worse: dbt-duckdb's `delete+insert`
+   incremental strategy also matches its unique_key with plain `=`
+   (`dbt/include/duckdb/macros/materializations/incremental_strategy/delete_insert.sql`),
+   so a nullable grain column would mean the delete step never matches an
+   existing null-keyed row on a later incremental run -- insert adds a
+   duplicate instead of replacing it, forever. Fixed at the source:
+   `coalesce(biz_state, 'UNSPECIFIED')` in the gold model itself, so the
+   unique_key is never null. Never leave a nullable column in an
+   incremental unique_key, even if today's data happens not to trigger it.
+
 ## Running it yourself
 
 ```bash
@@ -194,7 +230,7 @@ python -m venv .venv
 # dbt
 .venv/bin/dbt run --project-dir dbt --profiles-dir dbt
 .venv/bin/dbt test --project-dir dbt --profiles-dir dbt
-# ^ expect 16/18 passing -- the 2 rejection-rate tests fail on purpose,
+# ^ expect 25/27 passing -- the 2 rejection-rate tests fail on purpose,
 #   see "The data-quality gate, proven to actually fail" below.
 
 # Delta write -- only meaningful to run manually if you've fixed the gate;
@@ -219,10 +255,6 @@ print(dt.version(), dt.to_pyarrow_table().num_rows)
 
 ## Known limitations (being upfront, not hiding them)
 
-- **`sec_edgar_10k` bronze data has no models yet.** It's a valid dbt
-  source (see `dbt/models/staging/sources.yml`) but nothing reads it.
-  Straightforward to add -- staging view, silver dedup on `_id`, a gold
-  aggregate -- just not built out in this pass.
 - **Airflow runs via `dags test`, not a live scheduler.** This executes
   the real DAG and real operators end-to-end, but a persistent
   scheduler/webserver/triggerer stack (what you'd actually deploy) wasn't

@@ -23,3 +23,13 @@ models:
       - name: commit_count
         tests:
           - not_null
+
+  - name: gold_sec_filings_by_state_month
+    description: One row per (file_month, biz_state, form_type). Materialized to Delta Lake by scripts/write_gold_to_delta.py.
+    columns:
+      - name: file_month
+        tests:
+          - not_null
+      - name: filing_count
+        tests:
+          - not_null

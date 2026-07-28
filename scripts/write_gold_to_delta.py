@@ -22,6 +22,7 @@ DELTA_ROOT = "data/delta"
 GOLD_TABLES = [
     "gold.gold_311_daily_agency_summary",
     "gold.gold_commit_activity_daily",
+    "gold.gold_sec_filings_by_state_month",
 ]
 
 

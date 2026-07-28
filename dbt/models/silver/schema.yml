@@ -39,3 +39,24 @@ models:
       - name: rejection_reason
         tests:
           - not_null
+
+  - name: slv_sec_filings
+    description: One row per SEC filing (accession number), deduped -- the search API can return multiple matched documents per filing.
+    columns:
+      - name: accession_number
+        tests:
+          - unique
+          - not_null
+      - name: cik
+        tests:
+          - not_null
+      - name: file_date
+        tests:
+          - not_null
+
+  - name: rejected_sec_filings
+    description: SEC filing records that failed validation (missing accession number/cik/file_date), quarantined with a reason.
+    columns:
+      - name: rejection_reason
+        tests:
+          - not_null
