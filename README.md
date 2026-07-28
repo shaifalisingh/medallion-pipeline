@@ -20,8 +20,12 @@ silver.slv_*                 silver.rejected_*      <- quarantine, not silent dr
 (valid rows only)             (bad rows + reason)
       |                            |
       v                            v  dbt/tests/assert_*_rejection_rate_below_threshold.sql
-gold.*                        rejection rate > 2%?  -- fails the pipeline if yes
-(BI-ready aggregates)
+gold.* (incremental,          rejection rate > 2%?  -- fails the pipeline if yes
+ delete+insert, N-day
+ lookback window --
+ late arrivals get
+ re-aggregated, not
+ silently missed)
       |
       v   scripts/write_gold_to_delta.py  (only runs if all dbt tests pass)
 data/delta/*                   real Delta Lake tables (_delta_log, versioned, Parquet)
@@ -136,6 +140,51 @@ tables:
 purpose -- it's a permanent, inspectable demonstration of the gate, not a
 one-off you'd have to take on faith from a screenshot.)
 
+## Late-arriving records: proven broken, then fixed
+
+Gold tables are `materialized='incremental'` with a `delete+insert`
+strategy, not full-refresh tables -- that's the realistic version of this
+problem. A naive incremental filter ("only reprocess rows newer than what
+I've already aggregated") has a real failure mode: a record that arrives
+late for a day you already closed out is never newer than your watermark,
+so it's silently invisible forever. `scripts/generate_late_arrival_batch.py`
+manufactures exactly that case -- a NYC 311 complaint dated 2026-07-26
+(already-aggregated day) that shows up in a bronze batch ingested days
+later, on 2026-08-01.
+
+Proved both the bug and the fix live, on the same grain
+(2026-07-26 / NYPD / Noise - Street/Sidewalk, baseline 271 requests):
+
+```
+$ dbt run --vars '{"late_arrival_lookback_days": 0}'   # naive: no lookback
+$ dbt test --select assert_gold_311_matches_full_recompute
+  silver (fresh, always full):     272  <- late record correctly parsed in
+  gold   (incremental, no lookback): 271  <- never reprocessed that day, missed it
+  FAIL 1 assert_gold_311_matches_full_recompute
+
+$ dbt run                                                # fixed: default lookback = 3 days
+$ dbt test --select assert_gold_311_matches_full_recompute
+  gold: 272  <- day got reprocessed because it's within the lookback window
+  PASS
+```
+
+The fix is `dbt/models/gold/*.sql` reprocessing the last
+`late_arrival_lookback_days` (3) days of history on every run instead of
+strictly `> max(already_processed)`, combined with `delete+insert` on the
+grain key so the reprocessed day's row gets replaced with the corrected
+count, not duplicated. `dbt/tests/assert_gold_*_matches_full_recompute.sql`
+is what actually catches a regression here -- it doesn't know which day
+was late, it just diffs gold against a fresh recompute from silver and
+fails on any mismatch. That test is what caught the naive version above,
+and it's what would catch this breaking again if the lookback window were
+removed or set too low.
+
+This is a bounded fix, not an unlimited one: a record arriving later than
+3 days after its event date still needs a manual `--full-refresh` to be
+picked up. That's a deliberate trade-off (reprocessing 3 days of history
+every run is cheap; reprocessing all of history every run defeats the
+point of incremental models) -- see Known limitations.
+
 ## Running it yourself
 
 ```bash
@@ -145,7 +194,7 @@ python -m venv .venv
 # dbt
 .venv/bin/dbt run --project-dir dbt --profiles-dir dbt
 .venv/bin/dbt test --project-dir dbt --profiles-dir dbt
-# ^ expect 14/16 passing -- the 2 rejection-rate tests fail on purpose,
+# ^ expect 16/18 passing -- the 2 rejection-rate tests fail on purpose,
 #   see "The data-quality gate, proven to actually fail" below.
 
 # Delta write -- only meaningful to run manually if you've fixed the gate;
@@ -190,10 +239,19 @@ print(dt.version(), dt.to_pyarrow_table().num_rows)
   evaluates the whole table each run. A production version would gate on
   the current run's batch specifically, so one bad batch can't get diluted
   below the threshold by a large history of clean data.
-- **No incremental/merge logic in the gold write.** Every run is a full
-  `mode="overwrite"` of each Delta table. Fine for daily batch aggregates
-  at this scale; a real incremental `MERGE` (Delta's `merge()` API) would
-  be the next step for larger, append-heavy gold tables.
+- **Delta write is a full snapshot export, not an incremental append.**
+  `write_gold_to_delta.py` always writes the whole current gold table with
+  `mode="overwrite"`. That's fine here since the underlying DuckDB gold
+  table is now correctly incremental (see "Late-arriving records" above)
+  -- the export is a full snapshot of an already-correct table, not a
+  source of staleness. A real incremental Delta `merge()` on the export
+  step itself would only start to matter at a scale where re-exporting
+  the whole gold table every run gets expensive.
+- **The late-arrival lookback window is bounded, not unlimited.** A record
+  arriving more than `late_arrival_lookback_days` (3) after its event date
+  still needs a manual `--full-refresh` to be picked up -- see "Late-arriving
+  records" above for why that trade-off was made deliberately rather than
+  reprocessing all of history on every run.
 - **Bronze data here is a snapshot, not a live read.** `bronze_source/` is
   a copy of Project 1's actual live output (see its README for how it was
   produced), not a live pointer at Project 1's `data/bronze/`. Decoupled

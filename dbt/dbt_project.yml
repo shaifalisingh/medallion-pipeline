@@ -8,6 +8,13 @@ model-paths: ["models"]
 seed-paths: ["seeds"]
 clean-targets: ["target", "dbt_packages"]
 
+vars:
+  # How many days of already-processed history to re-aggregate on every
+  # incremental run, so a record that arrives late for a day we already
+  # closed out still gets picked up. Bounded on purpose -- a record later
+  # than this window still needs a manual full-refresh; see README.
+  late_arrival_lookback_days: 3
+
 models:
   medallion_pipeline:
     staging:
