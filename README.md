@@ -1,5 +1,7 @@
 # Medallion Pipeline
 
+[![CI](https://github.com/shaifalisingh/medallion-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/shaifalisingh/medallion-pipeline/actions/workflows/ci.yml)
+
 Bronze → silver → gold, built on real dbt, real Airflow, and a real local
 Delta Lake -- not stand-ins for those tools. This is Project 2: it picks up
 exactly where [connector-starter-kit](https://github.com/shaifalisingh/connector-starter-kit)
@@ -282,6 +284,14 @@ account (`~/.databrickscfg` profile `singhshaifali25@gmail.com`). Running
 this elsewhere means pointing it at your own workspace and warehouse ID.
 
 ## Running it yourself
+
+CI (`.github/workflows/ci.yml`) runs `pytest tests/test_pipeline.py` on
+every push -- the real `dbt run`/`dbt test`/`write_gold_to_delta.py`
+against the committed bronze fixtures, asserting no *unexpected* test
+failure (the 2 intentional rejection-rate failures are expected and
+don't fail the build; anything else failing does). Airflow and the
+Unity Catalog publish aren't run in CI -- see the module docstring in
+that test file for why.
 
 ```bash
 python -m venv .venv
