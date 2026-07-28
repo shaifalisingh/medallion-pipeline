@@ -1,0 +1,25 @@
+version: 2
+
+models:
+  - name: gold_311_daily_agency_summary
+    description: One row per (request_date, agency, complaint_type). Materialized to Delta Lake by scripts/write_gold_to_delta.py.
+    columns:
+      - name: request_date
+        tests:
+          - not_null
+      - name: agency
+        tests:
+          - not_null
+      - name: request_count
+        tests:
+          - not_null
+
+  - name: gold_commit_activity_daily
+    description: One row per (authored_date, author). Materialized to Delta Lake by scripts/write_gold_to_delta.py.
+    columns:
+      - name: authored_date
+        tests:
+          - not_null
+      - name: commit_count
+        tests:
+          - not_null

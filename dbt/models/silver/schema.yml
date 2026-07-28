@@ -1,0 +1,27 @@
+version: 2
+
+models:
+  - name: slv_311_requests
+    description: One row per NYC 311 service request, deduped on request_id.
+    columns:
+      - name: request_id
+        tests:
+          - unique
+          - not_null
+      - name: created_at
+        tests:
+          - not_null
+      - name: agency
+        tests:
+          - not_null
+
+  - name: slv_commits
+    description: One row per GitHub commit SHA, deduped.
+    columns:
+      - name: commit_sha
+        tests:
+          - unique
+          - not_null
+      - name: authored_at
+        tests:
+          - not_null

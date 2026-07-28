@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: >
+      Raw, append-only JSONL landed by the connector-starter-kit project
+      (Project 1). Read directly off disk via DuckDB's read_json_auto --
+      no load step, no copy into a table. In production this location
+      would be an S3 bronze bucket instead of a local directory; the SQL
+      doesn't change, only the path.
+    meta:
+      external_location: "read_json_auto('bronze_source/{identifier}/*/*.jsonl', union_by_name=true)"
+    tables:
+      - name: nyc_311
+      - name: github_commits
+      - name: sec_edgar_10k

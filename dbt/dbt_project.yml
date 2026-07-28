@@ -1,0 +1,21 @@
+name: medallion_pipeline
+version: "1.0.0"
+config-version: 2
+
+profile: medallion_pipeline
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  medallion_pipeline:
+    staging:
+      +materialized: view
+      +schema: staging
+    silver:
+      +materialized: table
+      +schema: silver
+    gold:
+      +materialized: table
+      +schema: gold
