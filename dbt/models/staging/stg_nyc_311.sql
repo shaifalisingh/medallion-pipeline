@@ -2,9 +2,9 @@
 -- Kept as a view so it costs nothing to re-run and always reflects the
 -- current bronze files on disk.
 select
-    unique_key::bigint          as request_id,
-    created_date::timestamp     as created_at,
-    closed_date::timestamp      as closed_at,
+    try_cast(unique_key as bigint)     as request_id,
+    try_cast(created_date as timestamp) as created_at,
+    try_cast(closed_date as timestamp)  as closed_at,
     agency,
     agency_name,
     complaint_type,

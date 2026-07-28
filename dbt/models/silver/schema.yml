@@ -25,3 +25,17 @@ models:
       - name: authored_at
         tests:
           - not_null
+
+  - name: rejected_311_requests
+    description: 311 records that failed validation (missing id/agency/created_at), quarantined with a reason.
+    columns:
+      - name: rejection_reason
+        tests:
+          - not_null
+
+  - name: rejected_commits
+    description: Commit records that failed validation (missing sha/authored_at), quarantined with a reason.
+    columns:
+      - name: rejection_reason
+        tests:
+          - not_null
